@@ -3,17 +3,22 @@ require "test_helper"
 class Lexxy::TagHelperTest < ActionView::TestCase
   helper ActionText::ContentHelper
 
+  setup do
+    skip "lexxy_rich_textarea_tag is not available when using the ActionText::Editor adapter" if Lexxy.supports_editor_adapter?
+  end
+
   test "#lexxy_rich_textarea_tag renders <action-text-attachment> elements" do
     render inline: <<~ERB, locals: { post: posts(:hello_james) }
       <%= lexxy_rich_textarea_tag :body, post.body %>
     ERB
 
     assert_dom "lexxy-editor", count: 1 do |lexxy_editor, *|
-      assert_dom fragment(lexxy_editor["value"]), "div" do |div|
-        attachment = div.at("action-text-attachment")
+      assert_dom fragment(lexxy_editor["value"]), "*" do |value|
+        attachment = value.at("action-text-attachment")
 
-        assert_equal "Hello ", div.text
-        assert_equal "<em>James Anderson</em> (<strong>JA</strong>)", JSON.parse(attachment["content"])
+        assert_equal "Hello ", value.text
+        assert_equal %(<bc-mention gid="#{people(:james).to_gid}"><em>James Anderson</em> (<strong>JA</strong>)</bc-mention>), JSON.parse(attachment["content"])
+        assert_equal "application/vnd.actiontext.mention", attachment["content-type"]
       end
     end
   end
@@ -23,9 +28,21 @@ class Lexxy::TagHelperTest < ActionView::TestCase
       <%= lexxy_rich_textarea_tag :body, "<p>Sample Content</p>" %>
     ERB
     assert_dom "lexxy-editor", count: 1 do |lexxy_editor, *|
-      assert_dom fragment(lexxy_editor["value"]), "div" do |div|
-        assert_equal "<p>Sample Content</p>", div.inner_html
-      end
+      assert_equal "<p>Sample Content</p>", lexxy_editor["value"]
+    end
+  end
+
+  test "#lexxy_rich_textarea_tag preserves HTML entities in code blocks" do
+    code_html = '<pre data-language="html">&lt;div&gt;test&lt;/div&gt;</pre>'.html_safe
+
+    render inline: <<~ERB, locals: { code_html: code_html }
+      <%= lexxy_rich_textarea_tag :body, code_html %>
+    ERB
+
+    assert_dom "lexxy-editor", count: 1 do |lexxy_editor, *|
+      value = lexxy_editor["value"]
+      assert_includes value, "&lt;div&gt;"
+      assert_not_includes value, "<div>"
     end
   end
 end

@@ -6,24 +6,28 @@ import TableIcons from "./table_icons"
 import theme from "../../config/theme"
 import { handleRollingTabIndex } from "../../helpers/accessibility_helper"
 import { createElement } from "../../helpers/html_helper"
-import { nextFrame } from "../../helpers/timing_helpers"
+import { nextFrame } from "../../helpers/timing_helper"
+import { ListenerBin, registerEventListener } from "../../helpers/listener_helper"
 
 export class TableTools extends HTMLElement {
+  #listeners = new ListenerBin()
+
   connectedCallback() {
     this.tableController = new TableController(this.#editorElement)
+    this.classList.add("lexxy-floating-controls")
 
     this.#setUpButtons()
+    this.#hide()
     this.#monitorForTableSelection()
     this.#registerKeyboardShortcuts()
   }
 
   disconnectedCallback() {
-    this.#unregisterKeyboardShortcuts()
+    this.dispose()
+  }
 
-    this.unregisterUpdateListener?.()
-    this.unregisterUpdateListener = null
-
-    this.removeEventListener("keydown", this.#handleToolsKeydown)
+  dispose() {
+    this.#listeners.dispose()
 
     this.tableController?.destroy()
     this.tableController = null
@@ -42,15 +46,17 @@ export class TableTools extends HTMLElement {
   }
 
   #setUpButtons() {
+    this.innerHTML = ""
+
     this.appendChild(this.#createRowButtonsContainer())
     this.appendChild(this.#createColumnButtonsContainer())
 
     this.appendChild(this.#createDeleteTableButton())
-    this.addEventListener("keydown", this.#handleToolsKeydown)
+    this.#listeners.track(registerEventListener(this, "keydown", this.#handleToolsKeydown))
   }
 
   #createButtonsContainer(childType, setCountProperty, moreMenu) {
-    const container = createElement("div", { className: `lexxy-table-control lexxy-table-control--${childType}` })
+    const container = createElement("div", { className: `lexxy-floating-controls__group lexxy-table-control lexxy-table-control--${childType}` })
 
     const plusButton = this.#createButton(`Add ${childType}`, { action: "insert", childType, direction: "after" }, "+")
     const minusButton = this.#createButton(`Remove ${childType}`, { action: "delete", childType }, "−")
@@ -89,7 +95,7 @@ export class TableTools extends HTMLElement {
   }
 
   #createMoreMenuSection(childType) {
-    const section = createElement("div", { className: "lexxy-table-control__more-menu-details" })
+    const section = createElement("div", { className: "lexxy-floating-controls__group lexxy-table-control__more-menu-details" })
     const addBeforeButton = this.#createButton(`Add ${childType} before`, { action: "insert", childType, direction: "before" })
     const addAfterButton = this.#createButton(`Add ${childType} after`, { action: "insert", childType, direction: "after" })
     const toggleStyleButton = this.#createButton(`Toggle ${childType} style`, { action: "toggle", childType })
@@ -104,7 +110,7 @@ export class TableTools extends HTMLElement {
   }
 
   #createDeleteTableButton() {
-    const container = createElement("div", { className: "lexxy-table-control" })
+    const container = createElement("div", { className: "lexxy-table-control lexxy-floating-controls__group" })
 
     const deleteTableButton = this.#createButton("Delete this table?", { action: "delete", childType: "table" })
     deleteTableButton.classList.add("lexxy-table-control__button--delete-table")
@@ -139,12 +145,7 @@ export class TableTools extends HTMLElement {
   }
 
   #registerKeyboardShortcuts() {
-    this.unregisterKeyboardShortcuts = this.#editor.registerCommand(KEY_DOWN_COMMAND, this.#handleAccessibilityShortcutKey, COMMAND_PRIORITY_HIGH)
-  }
-
-  #unregisterKeyboardShortcuts() {
-    this.unregisterKeyboardShortcuts?.()
-    this.unregisterKeyboardShortcuts = null
+    this.#listeners.track(this.#editor.registerCommand(KEY_DOWN_COMMAND, this.#handleAccessibilityShortcutKey, COMMAND_PRIORITY_HIGH))
   }
 
   #handleAccessibilityShortcutKey = (event) => {
@@ -214,16 +215,15 @@ export class TableTools extends HTMLElement {
   }
 
   #monitorForTableSelection() {
-    this.unregisterUpdateListener = this.#editor.registerUpdateListener(() => {
-      this.tableController.updateSelectedTable()
+    this.#listeners.track(this.#editor.registerUpdateListener(() => {
+      const tableNode = this.#editor.getRootElement() && this.tableController.updateSelectedTable()
 
-      const tableNode = this.tableController.currentTableNode
       if (tableNode) {
         this.#show()
       } else {
         this.#hide()
       }
-    })
+    }))
   }
 
   #executeTableCommand(command) {
@@ -232,8 +232,11 @@ export class TableTools extends HTMLElement {
   }
 
   #show() {
+    this.#updateButtonsPosition()
     this.style.display = "flex"
-    this.#update()
+    this.#updateRowColumnCount()
+    this.#closeMoreMenu()
+    this.#handleCommandButtonHover()
   }
 
   #hide() {

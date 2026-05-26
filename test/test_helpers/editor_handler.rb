@@ -59,7 +59,6 @@ class EditorHandler
       });
       this.dispatchEvent(event);
     JS
-    sleep 0.1
   end
 
   def send_tab(shift: false)
@@ -76,7 +75,6 @@ class EditorHandler
       });
       this.dispatchEvent(event);
     JS
-    sleep 0.1
   end
 
   def select(text)
@@ -99,6 +97,26 @@ class EditorHandler
           break
         }
       }
+    JS
+  end
+
+  def place_cursor_at_end
+    simulate_first_interaction_if_needed
+
+    page.execute_script <<~JS
+      const lexxy = document.querySelector('lexxy-editor')
+      lexxy.selection.placeCursorAtTheEnd()
+    JS
+    flush_lexical_updates
+  end
+
+  def flush_lexical_updates
+    page.evaluate_async_script <<~JS
+      const [ done ] = arguments
+      const editor = document.querySelector('lexxy-editor').editor
+      editor.update(() => null, {
+        onUpdate: () => requestAnimationFrame(done)
+      });
     JS
   end
 
@@ -138,7 +156,11 @@ class EditorHandler
   end
 
   def toggle_command(command, toolbar_selector = "lexxy-toolbar")
-    find("#{toolbar_selector} [data-command=\"#{command}\"]").click
+    button = find("#{toolbar_selector} [data-command=\"#{command}\"]", visible: :all)
+    if button.matches_css?(".lexxy-editor__toolbar-overflow-menu *")
+      find("#{toolbar_selector} .lexxy-editor__toolbar-overflow [data-dropdown-trigger]").click
+    end
+    button.click
   end
 
   def inner_html
@@ -156,9 +178,17 @@ class EditorHandler
 
     def simulate_first_interaction_if_needed
       # Adding text or selecting text will not work otherwise
-      unless @first_interaction_simulated
+      unless @first_interaction_simulated || content_element_active?
         content_element.click
         @first_interaction_simulated = true
       end
+    end
+
+    def content_element_active?
+      active_element == content_element
+    end
+
+    def active_element
+      page.evaluate_script "document.activeElement"
     end
 end

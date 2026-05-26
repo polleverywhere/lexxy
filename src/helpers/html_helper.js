@@ -1,7 +1,9 @@
 export function createElement(name, properties, content = "") {
   const element = document.createElement(name)
   for (const [ key, value ] of Object.entries(properties || {})) {
-    if (key in element) {
+    if (key === "dataset") {
+      Object.entries(value).forEach(([ key, value ]) => (element.dataset[key] = value))
+    } else if (key in element) {
       element[key] = value
     } else if (value !== null && value !== undefined) {
       element.setAttribute(key, value)
@@ -42,9 +44,37 @@ export function dispatch(element, eventName, detail = null, cancelable = false) 
   return element.dispatchEvent(new CustomEvent(eventName, { bubbles: true, detail, cancelable }))
 }
 
+export function addBlockSpacing(doc) {
+  const blocks = doc.querySelectorAll("body > :not(h1, h2, h3, h4, h5, h6) + *")
+  for (const block of blocks) {
+    const spacer = doc.createElement("p")
+    spacer.appendChild(doc.createElement("br"))
+    block.before(spacer)
+  }
+}
+
 export function generateDomId(prefix) {
   const randomPart = Math.random().toString(36).slice(2, 10)
   return `${prefix}-${randomPart}`
 }
 
+export function extractPlainTextFromHtml(innerHtml = "") {
+  return parseHtml(innerHtml).body.textContent.trim()
+}
 
+export function isActiveAndVisible(element) {
+  return element && !element.disabled && checkVisibility(element)
+}
+
+// no `checkVisibility` in Safari < 17.4
+// https://developer.mozilla.org/en-US/docs/Web/API/Element/checkVisibility#browser_compatibility
+function checkVisibility(element, options) {
+  if (element.checkVisibility) {
+    return element.checkVisibility(options)
+  } else {
+    if (options) throw new Error("Polyfilled checkVisibility does not support options")
+    // Will not work for body or a fixed position element child of the body
+    // which is OK since that doesn't apply in the toolbar where this is used
+    return Boolean(element.offsetParent)
+  }
+}

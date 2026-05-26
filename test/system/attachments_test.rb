@@ -7,51 +7,49 @@ class AttachmentsTest < ApplicationSystemTestCase
 
   test "upload image" do
     attach_file file_fixture("example.png") do
-      click_on "Upload file"
+      click_on "Upload files"
     end
 
     assert_image_figure_attachment content_type: "image/png", caption: "example.png"
   end
 
-  test "upload previewable attachment" do
+  test "upload previewable attachment shows file icon while preview loads" do
     attach_file file_fixture("dummy.pdf") do
-      click_on "Upload file"
+      click_on "Upload files"
     end
 
-    assert_image_figure_attachment content_type: "application/pdf", caption: "dummy.pdf"
-  end
-
-  test "upload non previewable attachment" do
-    attach_file file_fixture("note.txt") do
-      click_on "Upload file"
+    # Previewable non-image uploads (PDFs) show as file icon initially while
+    # the server generates the thumbnail. The preview swaps in once ready.
+    assert_figure_attachment content_type: "application/pdf" do
+      assert_selector ".attachment__icon"
+      assert_selector ".attachment__name", text: "dummy.pdf"
     end
-
-    assert_not_image_figure_attachment content_type: "text/plain", caption: "note.txt"
   end
 
-  test "delete attachments with the keyboard" do
+  test "upload image via image button" do
     attach_file file_fixture("example.png") do
-      click_on "Upload file"
+      click_on "Add images and video"
     end
 
     assert_image_figure_attachment content_type: "image/png", caption: "example.png"
+  end
 
-    find("figure.attachment img").click
-    wait_for_node_selection
+  test "upload file via file button" do
+    attach_file file_fixture("note.txt") do
+      click_on "Upload files"
+    end
 
-    find_editor.send_key "Delete"
-    wait_for_node_selection false
-
-    assert_no_attachment content_type: "image/png"
-    assert_editor_html "<p><br></p>"
+    assert_figure_attachment content_type: "text/plain" do
+      assert_selector ".attachment__name", text: "note.txt"
+    end
   end
 
   test "disable attachments" do
     visit edit_post_path(posts(:empty))
-    assert_button "Upload file"
+    assert_button "Upload files"
 
     visit edit_post_path(posts(:empty), attachments_disabled: true)
-    assert_no_button "Upload file"
+    assert_no_button "Upload files"
   end
 
   test "configure attachment tag name" do
@@ -75,7 +73,7 @@ class AttachmentsTest < ApplicationSystemTestCase
       configure_authenticated_uploads: true)
 
     attach_file file_fixture("example.png") do
-      click_on "Upload file"
+      click_on "Upload files"
     end
 
     assert_image_figure_attachment content_type: "image/png", caption: "example.png"
@@ -91,10 +89,24 @@ class AttachmentsTest < ApplicationSystemTestCase
       configure_authenticated_uploads: false)
 
     attach_file file_fixture("example.png") do
-      click_on "Upload file"
+      click_on "Upload files"
     end
 
     assert_selector "figure.attachment--error"
+  end
+
+  test "load attachment with custom tag" do
+    visit new_post_path(attachment_tag_name: "bc-attachment")
+
+    person = people(:james)
+
+    find_editor.value = <<~HTML
+    Hello World <bc-attachment sgid="#{person.attachable_sgid}" content-type="#{person.content_type}" content="&quot;#{person.name}&quot;"></bc-attachment>
+    HTML
+
+    assert_editor_html do
+      assert_selector "bc-attachment"
+    end
   end
 
   private

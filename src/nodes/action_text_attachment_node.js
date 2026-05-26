@@ -1,7 +1,9 @@
 import Lexxy from "../config/lexxy"
-import { $getEditor, DecoratorNode, HISTORY_MERGE_TAG } from "lexical"
-import { createAttachmentFigure, createElement, dispatchCustomEvent, isPreviewableImage } from "../helpers/html_helper"
-import { bytesToHumanSize } from "../helpers/storage_helper"
+import { $getEditor, $getNearestRootOrShadowRoot, DecoratorNode, HISTORY_MERGE_TAG } from "lexical"
+import { createAttachmentFigure, createElement, isPreviewableImage } from "../helpers/html_helper"
+import { bytesToHumanSize, extractFileName } from "../helpers/storage_helper"
+import { parseBoolean } from "../helpers/string_helper"
+import { REWRITE_HISTORY_COMMAND } from "../extensions/rewritable_history_extension"
 
 
 export class ActionTextAttachmentNode extends DecoratorNode {
@@ -39,15 +41,19 @@ export class ActionTextAttachmentNode extends DecoratorNode {
       },
       "img": () => {
         return {
-          conversion: (img) => ({
-            node: new ActionTextAttachmentNode({
-              src: img.getAttribute("src"),
-              caption: img.getAttribute("alt") || "",
-              contentType: "image/*",
-              width: img.getAttribute("width"),
-              height: img.getAttribute("height")
-            })
-          }), priority: 1
+          conversion: (img) => {
+            const fileName = extractFileName(img.getAttribute("src") ?? "")
+            return {
+              node: new ActionTextAttachmentNode({
+                src: img.getAttribute("src"),
+                fileName: fileName,
+                caption: img.getAttribute("alt") || "",
+                contentType: "image/*",
+                width: img.getAttribute("width"),
+                height: img.getAttribute("height")
+              })
+            }
+          }, priority: 1
         }
       },
       "video": () => {
@@ -74,13 +80,15 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     return Lexxy.global.get("attachmentTagName")
   }
 
-  constructor({ tagName, sgid, src, previewable, altText, caption, contentType, fileName, fileSize, width, height }, key) {
+  constructor({ tagName, sgid, src, previewSrc, previewable, pendingPreview, altText, caption, contentType, fileName, fileSize, width, height, uploadError }, key) {
     super(key)
 
     this.tagName = tagName || ActionTextAttachmentNode.TAG_NAME
     this.sgid = sgid
     this.src = src
-    this.previewable = previewable
+    this.previewSrc = previewSrc
+    this.previewable = parseBoolean(previewable)
+    this.pendingPreview = pendingPreview
     this.altText = altText || ""
     this.caption = caption || ""
     this.contentType = contentType || ""
@@ -88,19 +96,22 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     this.fileSize = fileSize
     this.width = width
     this.height = height
+    this.uploadError = uploadError
 
     this.editor = $getEditor()
   }
 
   createDOM() {
-    const figure = this.createAttachmentFigure()
+    if (this.uploadError) return this.createDOMForError()
+    if (this.pendingPreview) return this.#createDOMForPendingPreview()
 
-    figure.addEventListener("click", () => {
-      this.#select(figure)
-    })
+    const figure = this.createAttachmentFigure()
 
     if (this.isPreviewableAttachment) {
       figure.appendChild(this.#createDOMForImage())
+      figure.appendChild(this.#createEditableCaption())
+    } else if (this.isVideo) {
+      figure.appendChild(this.#createDOMForFile())
       figure.appendChild(this.#createEditableCaption())
     } else {
       figure.appendChild(this.#createDOMForFile())
@@ -110,7 +121,9 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     return figure
   }
 
-  updateDOM(_prevNode, dom) {
+  updateDOM(prevNode, dom) {
+    if (this.uploadError !== prevNode.uploadError) return true
+
     const caption = dom.querySelector("figcaption textarea")
     if (caption && this.caption) {
       caption.value = this.caption
@@ -124,7 +137,7 @@ export class ActionTextAttachmentNode extends DecoratorNode {
   }
 
   isInline() {
-    return false
+    return this.isAttached() && !this.getParent().is($getNearestRootOrShadowRoot(this))
   }
 
   exportDOM() {
@@ -167,20 +180,168 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     return null
   }
 
-  createAttachmentFigure() {
-    return createAttachmentFigure(this.contentType, this.isPreviewableAttachment, this.fileName)
+  createDOMForError() {
+    const figure = this.createAttachmentFigure()
+    figure.classList.add("attachment--error")
+    figure.appendChild(createElement("div", { innerText: `Error uploading ${this.fileName || "file"}` }))
+    return figure
   }
 
-  get #isPreviewableImage() {
-    return isPreviewableImage(this.contentType)
+  createAttachmentFigure(previewable = this.isPreviewableAttachment) {
+    const figure = createAttachmentFigure(this.contentType, previewable, this.fileName)
+    figure.draggable = true
+    figure.dataset.lexicalNodeKey = this.__key
+
+    const deleteButton = createElement("lexxy-node-delete-button")
+    figure.appendChild(deleteButton)
+
+    return figure
   }
 
   get isPreviewableAttachment() {
-    return this.#isPreviewableImage || this.previewable
+    return this.isPreviewableImage || this.previewable
   }
 
-  #createDOMForImage() {
-    return createElement("img", { src: this.src, alt: this.altText, ...this.#imageDimensions })
+  get isPreviewableImage() {
+    return isPreviewableImage(this.contentType)
+  }
+
+  get isVideo() {
+    return this.contentType.startsWith("video/")
+  }
+
+  #createDOMForPendingPreview() {
+    const figure = this.createAttachmentFigure(false)
+    figure.appendChild(this.#createDOMForFile())
+    figure.appendChild(this.#createDOMForNotImage())
+    this.#pollForPreview(figure)
+    return figure
+  }
+
+  patchAndRewriteHistory(patch) {
+    this.editor.dispatchCommand(REWRITE_HISTORY_COMMAND, {
+      [this.getKey()]: { patch }
+    })
+  }
+
+  replaceAndRewriteHistory(node) {
+    this.editor.dispatchCommand(REWRITE_HISTORY_COMMAND, {
+      [this.getKey()]: { replace: node }
+    })
+  }
+
+  #createDOMForImage(options = {}) {
+    const initialSrc = this.previewSrc || this.src
+    const img = createElement("img", { src: initialSrc, draggable: false, alt: this.altText, ...this.#imageDimensions, ...options })
+
+    if (this.previewable && !this.isPreviewableImage) {
+      img.onerror = () => this.#swapPreviewToFileDOM(img)
+    }
+
+    if (this.previewSrc) {
+      this.#preloadAndSwapSrc(img)
+    }
+
+    const container = createElement("div", { className: "attachment__container" })
+    container.appendChild(img)
+    return container
+  }
+
+  #preloadAndSwapSrc(img) {
+    const previewSrc = this.previewSrc
+    const serverImage = new Image()
+
+    serverImage.onload = () => this.#handleImageLoaded(img, previewSrc)
+    serverImage.onerror = () => this.#handleImageLoadError(previewSrc)
+    serverImage.src = this.src
+  }
+
+  #handleImageLoaded(img, previewSrc) {
+    img.src = this.src
+    this.patchAndRewriteHistory({ previewSrc: null })
+    this.#revokePreviewSrc(previewSrc)
+  }
+
+  #handleImageLoadError(previewSrc) {
+    this.patchAndRewriteHistory({
+      previewSrc: null,
+      uploadError: true
+    })
+    this.#revokePreviewSrc(previewSrc)
+  }
+
+  #revokePreviewSrc(previewSrc) {
+    if (previewSrc?.startsWith("blob:")) URL.revokeObjectURL(previewSrc)
+  }
+
+  #swapPreviewToFileDOM(img) {
+    const figure = img.closest("figure.attachment")
+    if (!figure) return
+
+    this.#swapFigureContent(figure, "attachment--preview", "attachment--file", () => {
+      figure.appendChild(this.#createDOMForFile())
+      figure.appendChild(this.#createDOMForNotImage())
+    })
+  }
+
+  #pollForPreview(figure) {
+    let attempt = 0
+    const maxAttempts = 10
+
+    const tryLoad = () => {
+      if (!this.editor.read(() => this.isAttached())) return
+
+      const img = new Image()
+      const cacheBustedSrc = `${this.src}${this.src.includes("?") ? "&" : "?"}_=${Date.now()}`
+
+      img.onload = () => {
+        if (!this.editor.read(() => this.isAttached())) return
+
+        // The placeholder is a file-type icon SVG (86×100). A real thumbnail
+        // generated from PDF/video content is significantly larger.
+        if (img.naturalWidth > 150 && img.naturalHeight > 150) {
+          this.#swapToPreviewDOM(figure, cacheBustedSrc)
+        } else {
+          retry()
+        }
+      }
+      img.onerror = () => retry()
+      img.src = cacheBustedSrc
+    }
+
+    const retry = () => {
+      attempt++
+      if (attempt < maxAttempts && this.editor.read(() => this.isAttached())) {
+        const delay = Math.min(2000 * Math.pow(1.5, attempt), 15000)
+        setTimeout(tryLoad, delay)
+      }
+    }
+
+    // Give the server time to start processing before the first attempt
+    setTimeout(tryLoad, 3000)
+  }
+
+  #swapToPreviewDOM(figure, previewSrc) {
+    this.#swapFigureContent(figure, "attachment--file", "attachment--preview", () => {
+      const img = createElement("img", { src: previewSrc, draggable: false, alt: this.altText })
+      img.onerror = () => this.#swapPreviewToFileDOM(img)
+      const container = createElement("div", { className: "attachment__container" })
+      container.appendChild(img)
+      figure.appendChild(container)
+      figure.appendChild(this.#createEditableCaption())
+    })
+
+    this.patchAndRewriteHistory({ pendingPreview: false })
+  }
+
+  #swapFigureContent(figure, fromClass, toClass, renderContent) {
+    figure.className = figure.className.replace(fromClass, toClass)
+
+    for (const child of [ ...figure.querySelectorAll(".attachment__container, .attachment__icon, figcaption") ]) {
+      child.remove()
+    }
+
+    renderContent()
   }
 
   get #imageDimensions() {
@@ -211,10 +372,6 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     return figcaption
   }
 
-  #select(figure) {
-    dispatchCustomEvent(figure, "lexxy:internal:select-node", { key: this.getKey() })
-  }
-
   #createEditableCaption() {
     const caption = createElement("figcaption", { className: "attachment__caption" })
     const input = createElement("textarea", {
@@ -226,6 +383,9 @@ export class ActionTextAttachmentNode extends DecoratorNode {
     input.addEventListener("focusin", () => input.placeholder = "Add caption...")
     input.addEventListener("blur", (event) => this.#handleCaptionInputBlurred(event))
     input.addEventListener("keydown", (event) => this.#handleCaptionInputKeydown(event))
+    input.addEventListener("copy", (event) => event.stopPropagation())
+    input.addEventListener("cut", (event) => event.stopPropagation())
+    input.addEventListener("paste", (event) => event.stopPropagation())
 
     caption.appendChild(input)
 
@@ -245,13 +405,28 @@ export class ActionTextAttachmentNode extends DecoratorNode {
 
   #handleCaptionInputKeydown(event) {
     if (event.key === "Enter") {
-      this.#updateCaptionValueFromInput(event.target)
       event.preventDefault()
+      event.target.blur()
 
       this.editor.update(() => {
-        this.selectNext()
-      }, { tag: HISTORY_MERGE_TAG })
+        // Place the cursor after the current image
+        this.selectNext(0, 0)
+      }, {
+        tag: HISTORY_MERGE_TAG
+      })
     }
+
+    // Stop all keydown events from bubbling to the Lexical root element.
+    // The caption textarea is outside Lexical's content model and should
+    // handle its own keyboard events natively (Ctrl+A, Ctrl+C, Ctrl+X, etc.).
     event.stopPropagation()
   }
+}
+
+export function $createActionTextAttachmentNode(...args) {
+  return new ActionTextAttachmentNode(...args)
+}
+
+export function $isActionTextAttachmentNode(node) {
+  return node instanceof ActionTextAttachmentNode
 }

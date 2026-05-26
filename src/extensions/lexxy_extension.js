@@ -22,7 +22,18 @@ export default class LexxyExtension {
     return null
   }
 
+  get allowedElements() {
+    return []
+  }
+
   initializeToolbar(_lexxyToolbar) {
 
+  }
+
+  setEditorValidity(flags, message) {
+    this.editorElement.setElementValidity(this, flags, message)
+  }
+
+  dispose() {
   }
 }

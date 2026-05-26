@@ -1,38 +1,61 @@
-import { $isTextNode, TextNode } from "lexical"
-import { HISTORY_MERGE_TAG, SKIP_DOM_SELECTION_TAG, SKIP_SCROLL_INTO_VIEW_TAG } from "lexical"
-import { $isListItemNode, $isListNode } from "@lexical/list"
+import { $caretFromPoint, $createNodeSelection, $createParagraphNode, $findMatchingParent, $getCaretInDirection, $getCaretRange, $getChildCaret, $getCommonAncestor, $getSelection, $getSiblingCaret, $isChildCaret, $isDecoratorNode, $isElementNode, $isExtendableTextPointCaret, $isLineBreakNode, $isParagraphNode, $isRangeSelection, $isRootNode, $isRootOrShadowRoot, $isSiblingCaret, $isTextNode, $isTextPointCaret, $normalizeCaret, $rewindSiblingCaret, $setSelectionFromCaretRange, $splitAtPointCaretNext, TextNode } from "lexical"
+import { ListNode } from "@lexical/list"
+import { $getNearestNodeOfType, $lastToFirstIterator } from "@lexical/utils"
+import { $wrapNodeInElement } from "@lexical/utils"
+import { $ensureForwardRangeSelection, $isAtNodeEnd } from "@lexical/selection"
 
-export const SILENT_UPDATE_TAGS = [ HISTORY_MERGE_TAG, SKIP_DOM_SELECTION_TAG, SKIP_SCROLL_INTO_VIEW_TAG ]
+import { CustomActionTextAttachmentNode } from "../nodes/custom_action_text_attachment_node"
 
-export function getNearestListItemNode(node) {
-  let current = node
-  while (current !== null) {
-    if ($isListItemNode(current)) return current
-    current = current.getParent()
+export function $containsRangeSelection(node, selection = $getSelection()) {
+  if ($isRangeSelection(selection)) {
+    const { commonAncestor } = $getCommonAncestor(selection.focus.getNode(), selection.anchor.getNode())
+    return $findMatchingParent(commonAncestor, parent => parent.is(node))
+  } else {
+    return false
   }
-  return null
+}
+
+export function $createNodeSelectionWith(...nodes) {
+  const selection = $createNodeSelection()
+  nodes.forEach(node => selection.add(node.getKey()))
+  return selection
+}
+
+export function $isShadowRoot(node) {
+  return $isElementNode(node) && $isRootOrShadowRoot(node) && !$isRootNode(node)
+}
+
+export function $makeSafeForRoot(node) {
+  if ($isTextNode(node)) {
+    return $wrapNodeInElement(node, $createParagraphNode)
+  } else if (node.isParentRequired()) {
+    const parent = node.createRequiredParent()
+    return $wrapNodeInElement(node, parent)
+  } else {
+    return node
+  }
 }
 
 export function getListType(node) {
-  let current = node
-  while (current) {
-    if ($isListNode(current)) {
-      return current.getListType()
-    }
-    current = current.getParent()
-  }
-  return null
+  const list = $getNearestNodeOfType(node, ListNode)
+  return list?.getListType() ?? null
 }
 
-export function isPrintableCharacter(event) {
-  // Ignore if modifier keys are pressed (except Shift for uppercase)
-  if (event.ctrlKey || event.metaKey || event.altKey) return false
+export function isEditorFocused(editor) {
+  const rootElement = editor.getRootElement()
+  return rootElement !== null && rootElement.contains(document.activeElement)
+}
 
-  // Ignore special keys
-  if (event.key.length > 1 && event.key !== "Enter" && event.key !== "Space") return false
+export function $isAtNodeEdge(point, atStart = null) {
+  if (atStart === null) {
+    return $isAtNodeEdge(point, true) || $isAtNodeEdge(point, false)
+  } else {
+    return atStart ? $isAtNodeStart(point) : $isAtNodeEnd(point)
+  }
+}
 
-  // Accept single character keys (letters, numbers, punctuation)
-  return event.key.length === 1
+export function $isAtNodeStart(point) {
+  return point.offset === 0
 }
 
 export function extendTextNodeConversion(conversionName, ...callbacks) {
@@ -65,3 +88,229 @@ export function extendConversion(nodeKlass, conversionName, callback = (output =
     return callback(conversionOutput, element) ?? conversionOutput
   }
 }
+
+export function $isCursorOnLastLine(selection) {
+  const anchorNode = selection.anchor.getNode()
+  const elementNode = $isElementNode(anchorNode) ? anchorNode : anchorNode.getParentOrThrow()
+  const children = elementNode.getChildren()
+  if (children.length === 0) return true
+
+  const lastChild = children[children.length - 1]
+
+  if (anchorNode === elementNode.getLatest() && selection.anchor.offset === children.length) return true
+  if (anchorNode === lastChild) return true
+
+  const lastLineBreakIndex = children.findLastIndex(child => $isLineBreakNode(child))
+  if (lastLineBreakIndex === -1) return true
+
+  const anchorIndex = children.indexOf(anchorNode)
+  return anchorIndex > lastLineBreakIndex
+}
+
+export function $isBlankNode(node) {
+  if (node.getTextContent().trim() !== "") return false
+
+  const children = node.getChildren?.()
+  if (!children || children.length === 0) return true
+
+  return children.every(child => {
+    if ($isLineBreakNode(child)) return true
+    return $isBlankNode(child)
+  })
+}
+
+export function $trimTrailingBlankNodes(parent) {
+  for (const child of $lastToFirstIterator(parent)) {
+    if ($isBlankNode(child)) {
+      child.remove()
+    } else {
+      break
+    }
+  }
+}
+
+// A list item is structurally empty if it contains no meaningful content.
+// Unlike getTextContent().trim() === "", this walks descendants to ensure
+// decorator nodes (mentions, attachments whose getTextContent() may return
+// invisible characters like \ufeff) are treated as non-empty content.
+export function $isListItemStructurallyEmpty(listItem) {
+  const children = listItem.getChildren()
+  for (const child of children) {
+    if ($isDecoratorNode(child)) return false
+    if ($isLineBreakNode(child)) continue
+    if ($isTextNode(child)) {
+      if (child.getTextContent().trim() !== "") return false
+    } else if ($isElementNode(child)) {
+      if (child.getTextContent().trim() !== "") return false
+    }
+  }
+  return true
+}
+
+export function isAttachmentSpacerTextNode(node, previousNode, index, childCount) {
+  return $isTextNode(node)
+    && node.getTextContent() === " "
+    && index === childCount - 1
+    && previousNode instanceof CustomActionTextAttachmentNode
+}
+
+export function $splitSelectedParagraphsAtInnerLineBreaks(selection) {
+  const topLevelElements = new Set()
+  for (const node of selection.getNodes()) {
+    const topLevel = node.getTopLevelElement()
+    if (topLevel) topLevelElements.add(topLevel)
+  }
+
+  for (const element of topLevelElements) {
+    if (!$isParagraphNode(element)) continue
+
+    const children = element.getChildren()
+    if (!children.some($isLineBreakNode)) continue
+
+    const groups = [ [] ]
+    for (const child of children) {
+      if ($isLineBreakNode(child)) {
+        groups.push([])
+        child.remove()
+      } else {
+        groups[groups.length - 1].push(child)
+      }
+    }
+
+    for (const group of groups) {
+      if (group.length === 0) continue
+      const paragraph = $createParagraphNode()
+      group.forEach(child => paragraph.append(child))
+      element.insertBefore(paragraph)
+    }
+    if (groups.some(group => group.length > 0)) element.remove()
+  }
+}
+
+export function $expandSelectionToLineBreaksAndSplitAtEdges(selection) {
+  $ensureForwardRangeSelection(selection)
+
+  const focusCaret = $caretFromPoint(selection.focus, "next")
+  const anchorCaret = $caretFromPoint(selection.anchor, "previous")
+
+  // A collapsed cursor adjacent to a <br> would claim it from both sides via
+  // inward-edge; force outward-only walks so each side finds its own boundary.
+  const skipInwardEdge = selection.isCollapsed()
+  const focusBrCaret = $getCaretAtLineBreakBoundary(focusCaret, skipInwardEdge)
+  let anchorBrCaret = $getCaretAtLineBreakBoundary(anchorCaret, skipInwardEdge)
+
+  if (focusBrCaret?.origin.is(anchorBrCaret?.origin)) {
+    anchorBrCaret = null
+  }
+
+  // Splitting focus first keeps the anchor <br>'s position stable.
+  const focusOuter = focusBrCaret && $splitAroundLineBreak(focusBrCaret)
+  const anchorOuter = anchorBrCaret && $splitAroundLineBreak(anchorBrCaret)
+
+  const innerStart = anchorOuter?.getNextSibling() ?? selection.anchor.getNode().getTopLevelElement()
+  const innerEnd = focusOuter?.getPreviousSibling() ?? selection.focus.getNode().getTopLevelElement()
+  if (!innerStart || !innerEnd) return
+
+  $setSelectionFromCaretRange($getCaretRange(
+    $normalizeCaret($getChildCaret(innerStart, "next")),
+    $getCaretInDirection(
+      $normalizeCaret($getChildCaret(innerEnd, "previous")),
+      "next",
+    ),
+  ))
+}
+
+function $getCaretAtLineBreakBoundary(caret, skipInwardEdge = false) {
+  const paragraph = caret.origin.getTopLevelElement()
+  if (!paragraph || !$isParagraphNode(paragraph)) return null
+
+  const lineBreak = (skipInwardEdge ? null : $inwardEdgeLineBreak(caret, paragraph))
+    ?? $outwardLineBreak(caret, paragraph)
+
+  return lineBreak ? $getSiblingCaret(lineBreak, caret.direction) : null
+}
+
+// Prefer a <br> the cursor is sitting flush against, except when a further <br>
+// also exists outward — that one is the real paragraph break for this side.
+function $inwardEdgeLineBreak(caret, paragraph) {
+  let candidateCaret
+
+  if (
+    ($isChildCaret(caret) && caret.origin.is(paragraph)) ||
+    ($isTextPointCaret(caret) && $isExtendableTextPointCaret(caret.getFlipped()))
+  ) {
+    candidateCaret = null
+  } else if ($isSiblingCaret(caret) && caret.getParentAtCaret().is(paragraph)) {
+    candidateCaret = caret
+  } else {
+    const childCaret = $paragraphChildCaretAtInwardEdge(caret, paragraph)
+    candidateCaret = childCaret ? $rewindSiblingCaret(childCaret) : null
+  }
+
+  if (candidateCaret && $isLineBreakNode(candidateCaret.origin)) {
+    return $candidateUnlessShadowed(candidateCaret)
+  } else {
+    return null
+  }
+}
+
+function $candidateUnlessShadowed(candidateCaret) {
+  const outward = candidateCaret.getNodeAtCaret()
+  return $isLineBreakNode(outward) ? null : candidateCaret.origin
+}
+
+function $outwardLineBreak(caret, paragraph) {
+  const startCaret = $outwardWalkStartCaret(caret, paragraph)
+  if (!startCaret) return null
+
+  for (const { origin } of startCaret) {
+    if (!origin.getParent().is(paragraph)) break
+    if ($isLineBreakNode(origin)) return origin
+  }
+  return null
+}
+
+function $outwardWalkStartCaret(caret, paragraph) {
+  if (caret.getParentAtCaret().is(paragraph)) {
+    return caret
+  } else {
+    return $paragraphChildCaretContaining(caret, paragraph)
+  }
+}
+
+function $paragraphChildCaretContaining(caret, paragraph) {
+  let cursor = caret.getSiblingCaret()
+  while (cursor && !cursor.origin.getParent()?.is(paragraph)) {
+    cursor = cursor.getParentCaret()
+  }
+  return cursor?.origin.getParent()?.is(paragraph) ? cursor : null
+}
+
+// Only succeeds when the cursor is flush against the inward edge of every
+// ancestor between itself and the paragraph child.
+function $paragraphChildCaretAtInwardEdge(caret, paragraph) {
+  let cursor = caret.getSiblingCaret()
+  while (cursor && !cursor.origin.getParent()?.is(paragraph)) {
+    if (cursor.getNodeAtCaret()) return null
+    cursor = cursor.getParentCaret()
+  }
+  return cursor?.origin.getParent()?.is(paragraph) ? cursor : null
+}
+
+function $splitAroundLineBreak(lineBreakCaret) {
+  let outer = null
+
+  if (lineBreakCaret.getNodeAtCaret() === null) {
+    lineBreakCaret.origin.remove()
+  } else {
+    const lineBreak = lineBreakCaret.origin
+    const splitCaret = $getCaretInDirection($rewindSiblingCaret(lineBreakCaret), "next")
+
+    $splitAtPointCaretNext(splitCaret)
+    outer = lineBreak.getTopLevelElement()
+    lineBreak.remove()
+  }
+
+  return outer
+}
+

@@ -2,10 +2,10 @@ module Lexxy
   module TagHelper
     def lexxy_rich_textarea_tag(name, value = nil, options = {}, &block)
       options = options.symbolize_keys
-      form = options.delete(:form)
 
       value = render_custom_attachments_in(value)
-      value = "<div>#{value}</div>" if value
+      # remove the html_safe attribute to preserve attribute escape
+      value = value.to_str if value.respond_to? :to_str
 
       options[:name] ||= name
       options[:value] ||= value
@@ -30,6 +30,7 @@ module Lexxy
               if node["url"].blank?
                 attachment = ActionText::Attachment.from_node(node)
                 node["content"] = render_action_text_attachment(attachment).to_json
+                node["content-type"] ||= attachment.content_type
               end
               node
             end
